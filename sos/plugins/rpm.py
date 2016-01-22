@@ -46,6 +46,13 @@ class Rpm(Plugin, RedHatPlugin):
             filter_cmd = 'awk -F "~~" ' \
                 '"{printf \\"%-59s %s\\n\\",\$1,\$2}"|sort'
             shell_cmd = "sh -c '%s'" % (rpmq_cmd + "|" + filter_cmd)
+            self.add_cmd_output(shell_cmd)
+
+            query_fmt = '"%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}'
+            query_fmt = query_fmt + '\t%{INSTALLTIME}\t'
+            query_fmt = query_fmt + '\t%{INSTALLTIME:date}\n"'
+            filter_cmd = 'sort -nr -k2'
+            shell_cmd = "sh -c '%s'" % (rpmq_cmd + "|" + filter_cmd)
             self.add_cmd_output(shell_cmd, root_symlink="installed-rpms")
 
         if self.get_option("verify"):
