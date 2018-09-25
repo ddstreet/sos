@@ -3,7 +3,6 @@
 DH_ALWAYS_EXCLUDE=.git
 export PYBUILD_NAME=sosreport
 export PYBUILD_DISABLE_python2=1
-export PYBUILD_BEFORE_BUILD=make updateversion
 export PYBUILD_INSTALL_ARGS_python3=--install-lib=usr/share/sosreport/ \
 	--install-data=usr/ \
 	--install-scripts=usr/share/sosreport/ \
