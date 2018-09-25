@@ -8,6 +8,8 @@ Build-Depends: debhelper (>= 9), dh-python, python3-all, gettext, python3-nose, 
 		python-futures
 Homepage: https://github.com/sosreport/sos
 X-Python3-Version: >= 3.3
+Vcs-Browser: https://salsa.debian.org/sosreport-team/sosreport
+Vcs-Git: git@salsa.debian.org:sosreport-team/sosreport.git
 
 Package: sosreport
 Architecture: any
