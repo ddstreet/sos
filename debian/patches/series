@@ -1,2 +1,3 @@
 0001-skip-py2-only-tests.patch
 avoid-distutils.diff
+archive-fix-stat-typo.patch

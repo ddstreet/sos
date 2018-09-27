@@ -1,0 +1,26 @@
+Description: Import fix stat typo upstream patch
+ Apply upstream fix (commit 4127d02f00561b458398ce2b5ced7ae853b23227) so
+ sosreport does not generate an error at runtime.
+Author: Louis Bouchard
+Origin: https://github.com/sosreport/sos/commit/4127d02f00561b458398ce2b5ced7ae853b23227
+Bug: https://github.com/sosreport/sos/pull/1374
+---
+Index: sosreport/sos/archive.py
+===================================================================
+--- sosreport.orig/sos/archive.py
++++ sosreport/sos/archive.py
+@@ -202,10 +202,10 @@ class FileCacheArchive(Archive):
+ 
+         def is_special(mode):
+             return any([
+-                stat.ISBLK(mode),
+-                stat.ISCHR(mode),
+-                stat.ISFIFO(mode),
+-                stat.ISSOCK(mode)
++                stat.S_ISBLK(mode),
++                stat.S_ISCHR(mode),
++                stat.S_ISFIFO(mode),
++                stat.S_ISSOCK(mode)
+             ])
+ 
+         # Check destination path presence and type
