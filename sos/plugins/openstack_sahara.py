@@ -53,7 +53,7 @@ class OpenStackSahara(Plugin):
         protect_keys = [
             "admin_password", "memcache_secret_key", "password",
             "qpid_password", "rabbit_password", "ssl_key_password",
-            "xenapi_connection_password"
+            "xenapi_connection_password", "transport_url"
         ]
         connection_keys = ["connection"]
 
@@ -86,12 +86,7 @@ class DebianSahara(OpenStackSahara, DebianPlugin, UbuntuPlugin):
 class RedHatSahara(OpenStackSahara, RedHatPlugin):
     """OpenStack sahara related information for Red Hat distributions."""
 
-    packages = (
-        'openstack-sahara',
-        'openstack-sahara-api',
-        'openstack-sahara-engine',
-        'python-saharaclient'
-    )
+    packages = ('openstack-selinux',)
 
     def setup(self):
         super(RedHatSahara, self).setup()

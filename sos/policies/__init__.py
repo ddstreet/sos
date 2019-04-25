@@ -9,11 +9,11 @@ import fnmatch
 import tempfile
 import random
 import string
-from os import environ
 
 from sos.utilities import (ImporterHelper,
                            import_module,
-                           shell_out)
+                           shell_out,
+                           sos_get_command_output)
 from sos.plugins import IndependentPlugin, ExperimentalPlugin
 from sos import _sos as _
 from sos import SoSOptions, _arg_names
@@ -47,6 +47,127 @@ def load(cache={}, sysroot=None):
         cache['policy'] = GenericPolicy()
 
     return cache['policy']
+
+
+class InitSystem(object):
+    """Encapsulates an init system to provide service-oriented functions to
+    sos.
+
+    This should be used to query the status of services, such as if they are
+    enabled or disabled on boot, or if the service is currently running.
+    """
+
+    def __init__(self, init_cmd=None, list_cmd=None, query_cmd=None):
+
+        self.services = {}
+
+        self.init_cmd = init_cmd
+        self.list_cmd = "%s %s" % (self.init_cmd, list_cmd) or None
+        self.query_cmd = "%s %s" % (self.init_cmd, query_cmd) or None
+
+        self.load_all_services()
+
+    def is_enabled(self, name):
+        """Check if given service name is enabled """
+        if self.services and name in self.services:
+            return self.services[name]['config'] == 'enabled'
+        return False
+
+    def is_disabled(self, name):
+        """Check if a given service name is disabled """
+        if self.services and name in self.services:
+            return self.services[name]['config'] == 'disabled'
+        return False
+
+    def is_service(self, name):
+        """Checks if the given service name exists on the system at all, this
+        does not check for the service status
+        """
+        return name in self.services
+
+    def is_running(self, name):
+        """Checks if the given service name is in a running state.
+
+        This should be overridden by initsystems that subclass InitSystem
+        """
+        # This is going to be primarily used in gating if service related
+        # commands are going to be run or not. Default to always returning
+        # True when an actual init system is not specified by policy so that
+        # we don't inadvertantly restrict sosreports on those systems
+        return True
+
+    def load_all_services(self):
+        """This loads all services known to the init system into a dict.
+        The dict should be keyed by the service name, and contain a dict of the
+        name and service status
+        """
+        pass
+
+    def _query_service(self, name):
+        """Query an individual service"""
+        if self.query_cmd:
+            try:
+                return sos_get_command_output("%s %s" % (self.query_cmd, name))
+            except Exception:
+                return None
+        return None
+
+    def parse_query(self, output):
+        """Parses the output returned by the query command to make a
+        determination of what the state of the service is
+
+        This should be overriden by anything that subclasses InitSystem
+        """
+        return output
+
+    def get_service_status(self, name):
+        """Returns the status for the given service name along with the output
+        of the query command
+        """
+        svc = self._query_service(name)
+        if svc is not None:
+            return {'name': name,
+                    'status': self.parse_query(svc['output']),
+                    'output': svc['output']
+                    }
+        else:
+            return {'name': name,
+                    'status': 'missing',
+                    'output': ''
+                    }
+
+
+class SystemdInit(InitSystem):
+
+    def __init__(self):
+        super(SystemdInit, self).__init__(
+            init_cmd='systemctl',
+            list_cmd='list-unit-files --type=service',
+            query_cmd='status'
+        )
+
+    def parse_query(self, output):
+        for line in output.splitlines():
+            if line.strip().startswith('Active:'):
+                return line.split()[1]
+        return 'unknown'
+
+    def load_all_services(self):
+        svcs = shell_out(self.list_cmd).splitlines()
+        for line in svcs:
+            try:
+                name = line.split('.service')[0]
+                config = line.split()[1]
+                self.services[name] = {
+                    'name': name,
+                    'config': config
+                }
+            except IndexError:
+                pass
+
+    def is_running(self, name):
+        svc = self.get_service_status(name)
+        return svc['status'] == 'active'
 
 
 class PackageManager(object):
@@ -263,11 +384,24 @@ class PresetDefaults(object):
         odict = self.opts.dict()
         pdict = {self.name: {DESC: self.desc, NOTE: self.note, OPTS: odict}}
 
+        if not os.path.exists(presets_path):
+            os.makedirs(presets_path, mode=0o755)
+
         with open(os.path.join(presets_path, self.name), "w") as pfile:
             json.dump(pdict, pfile)
 
     def delete(self, presets_path):
         os.unlink(os.path.join(presets_path, self.name))
+
+
+NO_PRESET = 'none'
+NO_PRESET_DESC = 'Do not load a preset'
+NO_PRESET_NOTE = 'Use to disable automatically loaded presets'
+
+GENERIC_PRESETS = {
+    NO_PRESET: PresetDefaults(name=NO_PRESET, desc=NO_PRESET_DESC,
+                              note=NO_PRESET_NOTE, opts=SoSOptions())
+    }
 
 
 class Policy(object):
@@ -313,6 +447,7 @@ No changes will be made to system configuration.
         self._valid_subclasses = []
         self.set_exec_path()
         self._host_sysroot = sysroot
+        self.register_presets(GENERIC_PRESETS)
 
     def get_valid_subclasses(self):
         return [IndependentPlugin] + self._valid_subclasses
@@ -387,6 +522,7 @@ No changes will be made to system configuration.
         name = self.get_local_name().split('.')[0]
         case = self.case_id
         label = self.commons['cmdlineopts'].label
+        date = ''
         rand = ''.join(random.choice(string.ascii_lowercase) for x in range(7))
 
         if self.name_pattern == 'legacy':
@@ -408,7 +544,7 @@ No changes will be made to system configuration.
             date=date,
             rand=rand
         )
-        return time.strftime(nstr)
+        return self.sanitize_filename(time.strftime(nstr))
 
     # for some specific binaries like "xz", we need to determine package
     # providing it; that is policy specific. By default return the binary
@@ -429,7 +565,7 @@ No changes will be made to system configuration.
                 xz_version = self.package_manager\
                                  .all_pkgs()[xz_package]["version"]
             except Exception as e:
-                xz_version = [0]  # deal like xz version is really old
+                xz_version = [u'0']  # deal like xz version is really old
             if xz_version >= [u'5', u'2']:
                 cmd = "%s -T%d" % (cmd, threads)
         return cmd
@@ -490,7 +626,7 @@ No changes will be made to system configuration.
         self.commons = commons
 
     def _set_PATH(self, path):
-        environ['PATH'] = path
+        os.environ['PATH'] = path
 
     def set_exec_path(self):
         self._set_PATH(self.PATH)
@@ -519,10 +655,10 @@ No changes will be made to system configuration.
 
         if archive:
             self._print(_("Your sosreport has been generated and saved "
-                        "in:\n  %s") % archive)
+                        "in:\n  %s") % archive, always=True)
         else:
             self._print(_("sosreport build tree is located at : %s" %
-                        directory))
+                        directory), always=True)
 
         self._print()
         if checksum:
@@ -532,10 +668,10 @@ No changes will be made to system configuration.
                         "representative."))
         self._print()
 
-    def _print(self, msg=None):
+    def _print(self, msg=None, always=False):
         """A wrapper around print that only prints if we are not running in
         quiet mode"""
-        if not self.commons['cmdlineopts'].quiet:
+        if always or not self.commons['cmdlineopts'].quiet:
             if msg:
                 print_(msg)
             else:
@@ -594,7 +730,7 @@ No changes will be made to system configuration.
 
             :returns: a ``PresetDefaults`` object.
         """
-        return self.presets[""]
+        return self.presets[NO_PRESET]
 
     def load_presets(self, presets_path=None):
         """Load presets from disk.
@@ -676,11 +812,16 @@ class LinuxPolicy(Policy):
     distro = "Linux"
     vendor = "None"
     PATH = "/bin:/sbin:/usr/bin:/usr/sbin"
+    init = None
 
     _preferred_hash_name = None
 
     def __init__(self, sysroot=None):
         super(LinuxPolicy, self).__init__(sysroot=sysroot)
+        if self.init == 'systemd':
+            self.init_system = SystemdInit()
+        else:
+            self.init_system = InitSystem()
 
     def get_preferred_hash_name(self):
 
@@ -726,8 +867,8 @@ class LinuxPolicy(Policy):
         """Returns the name usd in the pre_work step"""
         return self.host_name()
 
-    def sanitize_case_id(self, case_id):
-        return re.sub(r"[^-a-z,A-Z.0-9]", "", case_id)
+    def sanitize_filename(self, name):
+        return re.sub(r"[^-a-z,A-Z.0-9]", "", name)
 
     def lsmod(self):
         """Return a list of kernel module names as strings.
@@ -754,9 +895,6 @@ class LinuxPolicy(Policy):
 
         if cmdline_opts.case_id:
             self.case_id = cmdline_opts.case_id
-
-        if self.case_id:
-            self.case_id = self.sanitize_case_id(self.case_id)
 
         return
 

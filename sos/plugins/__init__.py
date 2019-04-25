@@ -91,6 +91,86 @@ def _file_is_compressed(path):
     return path.endswith(('.gz', '.xz', '.bz', '.bz2'))
 
 
+class SoSPredicate(object):
+    """A class to implement collection predicates.
+
+        A predicate gates the collection of data by an sos plugin. For any
+        `add_cmd_output()`, `add_copy_spec()` or `add_journal()` call, the
+        passed predicate will be evaulated and collection will proceed if
+        the result is `True`, and not otherwise.
+
+        Predicates may be used to control conditional data collection
+        without the need for explicit conditional blocks in plugins.
+    """
+    #: The plugin that owns this predicate
+    _owner = None
+
+    #: Skip all collection?
+    _dry_run = False
+
+    #: Kernel module enablement list
+    _kmods = []
+
+    #: Services enablement list
+    _services = []
+
+    def __str(self, quote=False, prefix="", suffix=""):
+        """Return a string representation of this SoSPredicate with
+            optional prefix, suffix and value quoting.
+        """
+        quotes = '"%s"'
+        pstr = "dry_run=%s, " % self._dry_run
+
+        kmods = self._kmods
+        kmods = [quotes % k for k in kmods] if quote else kmods
+        pstr += "kmods=[%s], " % (",".join(kmods))
+
+        services = self._services
+        services = [quotes % s for s in services] if quote else services
+        pstr += "services=[%s]" % (",".join(services))
+
+        return prefix + pstr + suffix
+
+    def __str__(self):
+        """Return a string representation of this SoSPredicate.
+
+            "dry_run=False, kmods=[], services=[]"
+        """
+        return self.__str()
+
+    def __repr__(self):
+        """Return a machine readable string representation of this
+            SoSPredicate.
+
+            "SoSPredicate(dry_run=False, kmods=[], services=[])"
+        """
+        return self.__str(quote=True, prefix="SoSPredicate(", suffix=")")
+
+    def __nonzero__(self):
+        """Predicate evaluation hook.
+        """
+        pvalue = False
+        for k in self._kmods:
+            pvalue |= self._owner.is_module_loaded(k)
+
+        for s in self._services:
+            pvalue |= self._owner.service_is_running(s)
+
+        # Null predicate?
+        if not any([self._kmods, self._services, self._dry_run]):
+            return True
+
+        return pvalue and not self._dry_run
+
+    def __init__(self, owner, dry_run=False, kmods=[], services=[]):
+        """Initialise a new SoSPredicate object.
+        """
+        self._owner = owner
+        self._kmods = list(kmods)
+        self._services = list(services)
+        self._dry_run = dry_run | self._owner.commons['cmdlineopts'].dry_run
+
+
 class Plugin(object):
     """ This is the base class for sosreport plugins. Plugins should subclass
     this and set the class variables where applicable.
@@ -123,10 +203,16 @@ class Plugin(object):
     files = ()
     commands = ()
     kernel_mods = ()
+    services = ()
     archive = None
     profiles = ()
     sysroot = '/'
-    timeout = 300
+    plugin_timeout = 300
+    _timeout_hit = False
+
+    # Default predicates
+    predicate = None
+    cmd_predicate = None
 
     def __init__(self, commons):
         if not getattr(self, "option_list", False):
@@ -149,11 +235,60 @@ class Plugin(object):
         self.soslog = self.commons['soslog'] if 'soslog' in self.commons \
             else logging.getLogger('sos')
 
+        # add the 'timeout' plugin option automatically
+        self.option_list.append(('timeout', 'timeout in seconds for plugin',
+                                 'fast', -1))
+
         # get the option list into a dictionary
         for opt in self.option_list:
             self.opt_names.append(opt[0])
             self.opt_parms.append({'desc': opt[1], 'speed': opt[2],
                                    'enabled': opt[3]})
+
+        # Initialise the default --dry-run predicate
+        self.set_predicate(SoSPredicate(self))
+
+    @property
+    def timeout(self):
+        '''Returns either the default plugin timeout value, the value as
+        provided on the commandline via -k plugin.timeout=value, or the value
+        of the global --plugin-timeout option.
+        '''
+        _timeout = None
+        try:
+            opt_timeout = self.get_option('plugin_timeout')
+            own_timeout = int(self.get_option('timeout'))
+            if opt_timeout is None:
+                _timeout = own_timeout
+            elif opt_timeout is not None and own_timeout == -1:
+                _timeout = int(opt_timeout)
+            elif opt_timeout is not None and own_timeout > -1:
+                _timeout = own_timeout
+            else:
+                return None
+        except ValueError:
+            return self.plugin_timeout  # Default to known safe value
+        if _timeout is not None and _timeout > -1:
+            return _timeout
+        return self.plugin_timeout
+
+    def check_timeout(self):
+        '''
+        Checks to see if the plugin has hit its timeout.
+
+        This is set when the sos.collect_plugin() method hits a timeout and
+        terminates the thread. From there, a Popen() call can still continue to
+        run, and we need to manually terminate it. Thus, check_timeout() should
+        only be called in sos_get_command_output().
+
+        Since sos_get_command_output() is not plugin aware, this method is
+        handed to that call to use as a polling method, to avoid passing the
+        entire plugin object.
+
+        Returns True if timeout has been hit, else False.
+
+        '''
+        return self._timeout_hit
 
     @classmethod
     def name(cls):
@@ -201,6 +336,67 @@ class Plugin(object):
     def is_installed(self, package_name):
         '''Is the package $package_name installed?'''
         return self.policy.pkg_by_name(package_name) is not None
+
+    def is_service(self, name):
+        '''Does the service $name exist on the system?'''
+        return self.policy.init_system.is_service(name)
+
+    def service_is_enabled(self, name):
+        '''Is the service $name enabled?'''
+        return self.policy.init_system.is_enabled(name)
+
+    def service_is_disabled(self, name):
+        '''Is the service $name disabled?'''
+        return self.policy.init_system.is_disabled(name)
+
+    def service_is_running(self, name):
+        '''Is the service $name currently running?'''
+        return self.policy.init_system.is_running(name)
+
+    def get_service_status(self, name):
+        '''Return the reported status for service $name'''
+        return self.policy.init_system.get_service_status(name)['status']
+
+    def set_predicate(self, pred):
+        """Set or clear the default predicate for this plugin.
+        """
+        self.predicate = pred
+
+    def set_cmd_predicate(self, pred):
+        """Set or clear the default predicate for command collection
+            for this plugin. If set, this predecate takes precedence
+            over the `Plugin` default predicate for command and journal
+            data collection.
+        """
+        self.cmd_predicate = pred
+
+    def get_predicate(self, cmd=False, pred=None):
+        """Get the current default `Plugin` or command predicate. If the
+            `cmd` argument is `True`, the current command predicate is
+            returned if set, otherwise the default `Plugin` predicate
+            will be returned (which may be `None`).
+
+            If no default predicate is set and a `pred` value is passed
+            it will be returned.
+        """
+        if pred is not None:
+            return pred
+        if cmd and self.cmd_predicate is not None:
+            return self.cmd_predicate
+        return self.predicate
+
+    def test_predicate(self, cmd=False, pred=None):
+        """Test the current predicate and return its value.
+
+            :param cmd: ``True`` if the predicate is gating a command or
+                        ``False`` otherwise.
+            :param pred: An optional predicate to override the current
+                         ``Plugin`` or command predicate.
+        """
+        pred = self.get_predicate(cmd=cmd, pred=pred)
+        if pred is not None:
+            return bool(pred)
+        return False
 
     def do_cmd_private_sub(self, cmd):
         '''Remove certificate and key output archived by sosreport. cmd
@@ -299,14 +495,23 @@ class Plugin(object):
             if not path:
                 return 0
             readable = self.archive.open_file(path)
-            result, replacements = re.subn(regexp, subst, readable.read())
+            content = readable.read()
+            if not isinstance(content, six.string_types):
+                content = content.decode('utf8', 'ignore')
+            result, replacements = re.subn(regexp, subst, content)
             if replacements:
                 self.archive.add_string(result, srcpath)
             else:
                 replacements = 0
-        except Exception as e:
-            msg = "regex substitution failed for '%s' with: '%s'"
-            self._log_error(msg % (path, e))
+        except (OSError, IOError) as e:
+            # if trying to regexp a nonexisting file, dont log it as an
+            # error to stdout
+            if e.errno == errno.ENOENT:
+                msg = "file '%s' not collected, substitution skipped"
+                self._log_debug(msg % path)
+            else:
+                msg = "regex substitution failed for '%s' with: '%s'"
+                self._log_error(msg % (path, e))
             replacements = 0
         return replacements
 
@@ -336,7 +541,10 @@ class Plugin(object):
         absdest = os.path.normpath(dest)
         # adjust the target used inside the report to always be relative
         if os.path.isabs(linkdest):
-            reldest = os.path.relpath(linkdest, os.path.dirname(srcpath))
+            # Canonicalize the link target path to avoid additional levels
+            # of symbolic links (that would affect the path nesting level).
+            realdir = os.path.realpath(os.path.dirname(srcpath))
+            reldest = os.path.relpath(linkdest, start=realdir)
             # trim leading /sysroot
             if self.use_sysroot():
                 reldest = reldest[len(os.sep + os.pardir):]
@@ -356,6 +564,21 @@ class Plugin(object):
             self._log_debug("link '%s' is a directory, skipping..." % linkdest)
             return
 
+        self.copied_files.append({'srcpath': srcpath,
+                                  'dstpath': dstpath,
+                                  'symlink': "yes",
+                                  'pointsto': linkdest})
+
+        # Check for indirect symlink loops by stat()ing the next step
+        # in the link chain.
+        try:
+            os.stat(absdest)
+        except OSError as e:
+            if e.errno == 40:
+                self._log_debug("link '%s' is part of a file system "
+                                "loop, skipping target..." % dstpath)
+                return
+
         # copy the symlink target translating relative targets
         # to absolute paths to pass to _do_copy_path.
         self._log_debug("normalized link target '%s' as '%s'"
@@ -368,11 +591,6 @@ class Plugin(object):
             self._log_debug("link '%s' points to itself, skipping target..."
                             % linkdest)
 
-        self.copied_files.append({'srcpath': srcpath,
-                                  'dstpath': dstpath,
-                                  'symlink': "yes",
-                                  'pointsto': linkdest})
-
     def _copy_dir(self, srcpath):
         try:
             for afile in os.listdir(srcpath):
@@ -384,7 +602,7 @@ class Plugin(object):
                 msg = "Too many levels of symbolic links copying"
                 self._log_error("_copy_dir: %s '%s'" % (msg, srcpath))
                 return
-            raise e
+            raise
 
     def _get_dest_for_srcpath(self, srcpath):
         if self.use_sysroot():
@@ -479,9 +697,19 @@ class Plugin(object):
         return (self.opt_names, self.opt_parms)
 
     def set_option(self, optionname, value):
-        '''set the named option to value.'''
+        """Set the named option to value. Ensure the original type
+           of the option value is preserved.
+        """
         for name, parms in zip(self.opt_names, self.opt_parms):
             if name == optionname:
+                # FIXME: ensure that the resulting type of the set option
+                # matches that of the default value. This prevents a string
+                # option from being coerced to int simply because it holds
+                # a numeric value (e.g. a password).
+                # See PR #1526 and Issue #1597
+                defaulttype = type(parms['enabled'])
+                if defaulttype != type(value) and defaulttype != type(None):
+                    value = (defaulttype)(value)
                 parms['enabled'] = value
                 return True
         else:
@@ -496,27 +724,16 @@ class Plugin(object):
         matches any of the option names is returned.
         """
 
-        global_options = ('verify', 'all_logs', 'log_size')
+        global_options = ('verify', 'all_logs', 'log_size', 'plugin_timeout')
 
         if optionname in global_options:
             return getattr(self.commons['cmdlineopts'], optionname)
 
-        def _check(key):
-            if hasattr(optionname, "__iter__"):
-                return key in optionname
-            else:
-                return key == optionname
-
         for name, parms in zip(self.opt_names, self.opt_parms):
-            if _check(name):
+            if name == optionname:
                 val = parms['enabled']
                 if val is not None:
                     return val
-
-        items = six.iteritems(self.commons.get('global_plugin_options', {}))
-        for key, value in items:
-            if _check(key):
-                return value
 
         return default
 
@@ -534,12 +751,18 @@ class Plugin(object):
     def _add_copy_paths(self, copy_paths):
         self.copy_paths.update(copy_paths)
 
-    def add_copy_spec(self, copyspecs, sizelimit=None, tailit=True):
+    def add_copy_spec(self, copyspecs, sizelimit=None, tailit=True, pred=None):
         """Add a file or glob but limit it to sizelimit megabytes. If fname is
         a single file the file will be tailed to meet sizelimit. If the first
         file in a glob is too large it will be tailed to meet the sizelimit.
         """
-        sizelimit = sizelimit or self.get_option("log_size")
+        if not self.test_predicate(pred=pred):
+            self._log_info("skipped copy spec '%s' due to predicate (%s)" %
+                           (copyspecs, self.get_predicate(pred=pred)))
+            return
+
+        if sizelimit is None:
+            sizelimit = self.get_option("log_size")
 
         if self.get_option('all_logs'):
             sizelimit = None
@@ -579,6 +802,9 @@ class Plugin(object):
             _file = None
 
             for _file in files:
+                if self._is_forbidden_path(_file):
+                    self._log_debug("skipping forbidden path '%s'" % _file)
+                    continue
                 try:
                     current_size += os.stat(_file)[stat.ST_SIZE]
                 except OSError:
@@ -611,7 +837,8 @@ class Plugin(object):
         result = sos_get_command_output(prog, timeout=timeout, stderr=stderr,
                                         chroot=root, chdir=runat,
                                         env=env, binary=binary,
-                                        sizelimit=sizelimit)
+                                        sizelimit=sizelimit,
+                                        poller=self.check_timeout)
 
         if result['status'] == 124:
             self._log_warn("command '%s' timed out after %ds"
@@ -650,7 +877,7 @@ class Plugin(object):
     def _add_cmd_output(self, cmd, suggest_filename=None,
                         root_symlink=None, timeout=300, stderr=True,
                         chroot=True, runat=None, env=None, binary=False,
-                        sizelimit=None):
+                        sizelimit=None, pred=None):
         """Internal helper to add a single command to the collection list."""
         cmdt = (
             cmd, suggest_filename,
@@ -661,24 +888,30 @@ class Plugin(object):
                      "'%s')")
         _logstr = "packed command tuple: " + _tuplefmt
         self._log_debug(_logstr % cmdt)
-        self.collect_cmds.append(cmdt)
-        self._log_info("added cmd output '%s'" % cmd)
+        if self.test_predicate(cmd=True, pred=pred):
+            self.collect_cmds.append(cmdt)
+            self._log_info("added cmd output '%s'" % cmd)
+        else:
+            self._log_info("skipped cmd output '%s' due to predicate (%s)" %
+                           (cmd, self.get_predicate(cmd=True, pred=pred)))
 
     def add_cmd_output(self, cmds, suggest_filename=None,
                        root_symlink=None, timeout=300, stderr=True,
                        chroot=True, runat=None, env=None, binary=False,
-                       sizelimit=None):
+                       sizelimit=None, pred=None):
         """Run a program or a list of programs and collect the output"""
         if isinstance(cmds, six.string_types):
             cmds = [cmds]
         if len(cmds) > 1 and (suggest_filename or root_symlink):
             self._log_warn("ambiguous filename or symlink for command list")
-        sizelimit = sizelimit or self.get_option("log_size")
+        if sizelimit is None:
+            sizelimit = self.get_option("log_size")
         for cmd in cmds:
             self._add_cmd_output(cmd, suggest_filename=suggest_filename,
                                  root_symlink=root_symlink, timeout=timeout,
                                  stderr=stderr, chroot=chroot, runat=runat,
-                                 env=env, binary=binary, sizelimit=sizelimit)
+                                 env=env, binary=binary, sizelimit=sizelimit,
+                                 pred=pred)
 
     def get_cmd_output_path(self, name=None, make=True):
         """Return a path into which this module should store collected
@@ -722,22 +955,31 @@ class Plugin(object):
 
         return outfn
 
-    def add_string_as_file(self, content, filename):
+    def add_string_as_file(self, content, filename, pred=None):
         """Add a string to the archive as a file named `filename`"""
-        self.copy_strings.append((content, filename))
-        content = content.splitlines()[0]
-        if not isinstance(content, six.string_types):
-            content = content.decode('utf8', 'ignore')
-        self._log_debug("added string ...'%s' as '%s'" % (content, filename))
 
-    def get_cmd_output_now(self, exe, suggest_filename=None,
-                           root_symlink=False, timeout=300, stderr=True,
-                           chroot=True, runat=None, env=None,
-                           binary=False, sizelimit=None):
+        # Generate summary string for logging
+        summary = content.splitlines()[0] if content else ''
+        if not isinstance(summary, six.string_types):
+            summary = content.decode('utf8', 'ignore')
+
+        if not self.test_predicate(cmd=False, pred=pred):
+            self._log_info("skipped string ...'%s' due to predicate (%s)" %
+                           (summary, self.get_predicate(pred=pred)))
+            return
+
+        self.copy_strings.append((content, filename))
+        self._log_debug("added string ...'%s' as '%s'" % (summary, filename))
+
+    def _get_cmd_output_now(self, exe, suggest_filename=None,
+                            root_symlink=False, timeout=300, stderr=True,
+                            chroot=True, runat=None, env=None,
+                            binary=False, sizelimit=None):
         """Execute a command and save the output to a file for inclusion in the
         report.
         """
         start = time()
+
         result = self.get_command_output(exe, timeout=timeout, stderr=stderr,
                                          chroot=chroot, runat=runat,
                                          env=env, binary=binary,
@@ -759,19 +1001,32 @@ class Plugin(object):
             self.archive.add_link(outfn, root_symlink)
 
         # save info for later
-        # save in our list
         self.executed_commands.append({'exe': exe, 'file': outfn_strip,
                                        'binary': 'yes' if binary else 'no'})
-        self.commons['xmlreport'].add_command(cmdline=exe,
-                                              exitcode=result['status'],
-                                              f_stdout=outfn_strip)
 
         return os.path.join(self.archive.get_archive_path(), outfn)
+
+    def get_cmd_output_now(self, exe, suggest_filename=None,
+                           root_symlink=False, timeout=300, stderr=True,
+                           chroot=True, runat=None, env=None,
+                           binary=False, sizelimit=None, pred=None):
+        """Execute a command and save the output to a file for inclusion in the
+        report.
+        """
+        if not self.test_predicate(cmd=True, pred=pred):
+            self._log_info("skipped cmd output '%s' due to predicate (%s)" %
+                           (exe, self.get_predicate(cmd=True, pred=pred)))
+            return None
+
+        return self._get_cmd_output_now(exe, timeout=timeout, stderr=stderr,
+                                        chroot=chroot, runat=runat,
+                                        env=env, binary=binary,
+                                        sizelimit=sizelimit)
 
     def is_module_loaded(self, module_name):
         """Return whether specified moudle as module_name is loaded or not"""
         if len(grep("^" + module_name + " ", "/proc/modules")) == 0:
-            return None
+            return False
         else:
             return True
 
@@ -790,7 +1045,7 @@ class Plugin(object):
 
     def add_journal(self, units=None, boot=None, since=None, until=None,
                     lines=None, allfields=False, output=None, timeout=None,
-                    identifier=None, catalog=None, sizelimit=None):
+                    identifier=None, catalog=None, sizelimit=None, pred=None):
         """Collect journald logs from one of more units.
 
         :param units: A string, or list of strings specifying the
@@ -875,7 +1130,7 @@ class Plugin(object):
 
         self._log_debug("collecting journal: %s" % journal_cmd)
         self._add_cmd_output(journal_cmd, timeout=timeout,
-                             sizelimit=log_size)
+                             sizelimit=log_size, pred=pred)
 
     def add_udev_info(self, device, attrs=False):
         """Collect udevadm info output for a given device
@@ -919,17 +1174,20 @@ class Plugin(object):
                              "('%s', '%s', '%s', %s, '%s', '%s', '%s', '%s'," +
                              "'%s %s')") % progs[0])
             self._log_info("collecting output of '%s'" % prog)
-            self.get_cmd_output_now(prog, suggest_filename=suggest_filename,
-                                    root_symlink=root_symlink, timeout=timeout,
-                                    stderr=stderr, chroot=chroot, runat=runat,
-                                    env=env, binary=binary,
-                                    sizelimit=sizelimit)
+            self._get_cmd_output_now(prog, suggest_filename=suggest_filename,
+                                     root_symlink=root_symlink,
+                                     timeout=timeout, stderr=stderr,
+                                     chroot=chroot, runat=runat,
+                                     env=env, binary=binary,
+                                     sizelimit=sizelimit)
 
     def _collect_strings(self):
         for string, file_name in self.copy_strings:
-            content = string.splitlines()[0]
-            if not isinstance(content, six.string_types):
-                content = content.decode('utf8', 'ignore')
+            content = ''
+            if string:
+                content = string.splitlines()[0]
+                if not isinstance(content, six.string_types):
+                    content = content.decode('utf8', 'ignore')
             self._log_info("collecting string ...'%s' as '%s'"
                            % (content, file_name))
             try:
@@ -977,7 +1235,8 @@ class Plugin(object):
         overridden.
         """
         # some files or packages have been specified for this package
-        if any([self.files, self.packages, self.commands, self.kernel_mods]):
+        if any([self.files, self.packages, self.commands, self.kernel_mods,
+                self.services]):
             if isinstance(self.files, six.string_types):
                 self.files = [self.files]
 
@@ -990,6 +1249,9 @@ class Plugin(object):
             if isinstance(self.kernel_mods, six.string_types):
                 self.kernel_mods = [self.kernel_mods]
 
+            if isinstance(self.services, six.string_types):
+                self.services = [self.services]
+
             if isinstance(self, SCLPlugin):
                 # save SCLs that match files or packages
                 type(self)._scls_matched = []
@@ -997,15 +1259,18 @@ class Plugin(object):
                     files = [f % {"scl_name": scl} for f in self.files]
                     packages = [p % {"scl_name": scl} for p in self.packages]
                     commands = [c % {"scl_name": scl} for c in self.commands]
-                    if self._files_pkgs_or_cmds_present(files,
-                                                        packages,
-                                                        commands):
+                    services = [s % {"scl_name": scl} for s in self.services]
+                    if self._check_plugin_triggers(files,
+                                                   packages,
+                                                   commands,
+                                                   services):
                         type(self)._scls_matched.append(scl)
                 return len(type(self)._scls_matched) > 0
 
-            return self._files_pkgs_or_cmds_present(self.files,
-                                                    self.packages,
-                                                    self.commands)
+            return self._check_plugin_triggers(self.files,
+                                               self.packages,
+                                               self.commands,
+                                               self.services)
 
         if isinstance(self, SCLPlugin):
             # if files and packages weren't specified, we take all SCLs
@@ -1013,16 +1278,17 @@ class Plugin(object):
 
         return True
 
-    def _files_pkgs_or_cmds_present(self, files, packages, commands):
-            kernel_mods = self.policy.lsmod()
+    def _check_plugin_triggers(self, files, packages, commands, services):
+        kernel_mods = self.policy.lsmod()
 
-            def have_kmod(kmod):
-                return kmod in kernel_mods
+        def have_kmod(kmod):
+            return kmod in kernel_mods
 
-            return (any(os.path.exists(fname) for fname in files) or
-                    any(self.is_installed(pkg) for pkg in packages) or
-                    any(is_executable(cmd) for cmd in commands) or
-                    any(have_kmod(kmod) for kmod in self.kernel_mods))
+        return (any(os.path.exists(fname) for fname in files) or
+                any(self.is_installed(pkg) for pkg in packages) or
+                any(is_executable(cmd) for cmd in commands) or
+                any(have_kmod(kmod) for kmod in self.kernel_mods) or
+                any(self.is_service(svc) for svc in services))
 
     def default_enabled(self):
         """This decides whether a plugin should be automatically loaded or

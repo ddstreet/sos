@@ -44,7 +44,11 @@ class Pacemaker(Plugin):
         self.add_copy_spec("/var/log/pcsd/pcsd.log")
         self.add_cmd_output([
             "pcs config",
-            "pcs status",
+            "pcs status --full",
+            "pcs stonith sbd status --full",
+            "pcs stonith sbd watchdog list",
+            "pcs stonith history show",
+            "pcs quorum status",
             "pcs property list --all"
         ])
 
@@ -64,9 +68,6 @@ class Pacemaker(Plugin):
 
     def setup(self):
         self.add_copy_spec([
-            # Pacemaker cluster configuration file
-            "/var/lib/pacemaker/cib/cib.xml",
-
             # Pacemaker 2.x default log locations
             "/var/log/pacemaker/pacemaker.log",
             "/var/log/pacemaker/bundles/*/",
@@ -141,6 +142,7 @@ class RedHatPacemaker(Pacemaker, RedHatPlugin):
     def setup(self):
         self.envfile = "/etc/sysconfig/pacemaker"
         self.setup_pcs()
+        self.add_copy_spec("/etc/sysconfig/sbd")
         super(RedHatPacemaker, self).setup()
 
     def postproc(self):

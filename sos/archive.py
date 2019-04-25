@@ -10,12 +10,9 @@
 #
 # See the LICENSE file in the source distribution for further information.
 import os
-import time
 import tarfile
 import shutil
 import logging
-import shlex
-import re
 import codecs
 import sys
 import errno
@@ -23,7 +20,7 @@ import stat
 from threading import Lock
 
 # required for compression callout (FIXME: move to policy?)
-from subprocess import Popen, PIPE
+from subprocess import Popen
 
 from sos.utilities import sos_get_command_output, is_executable
 
@@ -85,7 +82,7 @@ class Archive(object):
     def add_file(self, src, dest=None):
         raise NotImplementedError
 
-    def add_string(self, content, dest):
+    def add_string(self, content, dest, mode='w'):
         raise NotImplementedError
 
     def add_binary(self, content, dest):
@@ -142,11 +139,12 @@ class FileCacheArchive(Archive):
     _archive_root = ""
     _archive_name = ""
 
-    def __init__(self, name, tmpdir, policy, threads):
+    def __init__(self, name, tmpdir, policy, threads, enc_opts):
         self._name = name
         self._tmp_dir = tmpdir
         self._policy = policy
         self._threads = threads
+        self.enc_opts = enc_opts
         self._archive_root = os.path.join(tmpdir, name)
         with self._path_lock:
             os.makedirs(self._archive_root, 0o700)
@@ -158,7 +156,93 @@ class FileCacheArchive(Archive):
             name = name.lstrip(os.sep)
         return (os.path.join(self._archive_root, name))
 
-    def _check_path(self, src, path_type, dest=None):
+    def _make_leading_paths(self, src, mode=0o700):
+        """Create leading path components
+
+            The standard python `os.makedirs` is insufficient for our
+            needs: it will only create directories, and ignores the fact
+            that some path components may be symbolic links.
+
+            :param src: The source path in the host file system for which
+                        leading components should be created, or the path
+                        to an sos_* virtual directory inside the archive.
+
+                        Host paths must be absolute (initial '/'), and
+                        sos_* directory paths must be a path relative to
+                        the root of the archive.
+
+            :param mode: An optional mode to be used when creating path
+                         components.
+            :returns: A rewritten destination path in the case that one
+                      or more symbolic links in intermediate components
+                      of the path have altered the path destination.
+        """
+        self.log_debug("Making leading paths for %s" % src)
+        root = self._archive_root
+        dest = src
+
+        def in_archive(path):
+            """Test whether path ``path`` is inside the archive.
+            """
+            return path.startswith(os.path.join(root, ""))
+
+        if not src.startswith("/"):
+            # Sos archive path (sos_commands, sos_logs etc.)
+            src_dir = src
+        else:
+            # Host file path
+            src_dir = src if os.path.isdir(src) else os.path.split(src)[0]
+
+        # Build a list of path components in root-to-leaf order.
+        path = src_dir
+        path_comps = []
+        while path != '/' and path != '':
+            head, tail = os.path.split(path)
+            path_comps.append(tail)
+            path = head
+        path_comps.reverse()
+
+        abs_path = root
+        src_path = "/"
+
+        # Check and create components as needed
+        for comp in path_comps:
+            abs_path = os.path.join(abs_path, comp)
+
+            # Do not create components that are above the archive root.
+            if not in_archive(abs_path):
+                continue
+
+            src_path = os.path.join(src_path, comp)
+
+            if not os.path.exists(abs_path):
+                self.log_debug("Making path %s" % abs_path)
+                if os.path.islink(src_path) and os.path.isdir(src_path):
+                    target = os.readlink(src_path)
+
+                    # The directory containing the source in the host fs,
+                    # adjusted for the current level of path creation.
+                    target_dir = os.path.split(src_path)[0]
+
+                    # The source path of the target in the host fs to be
+                    # recursively copied.
+                    target_src = os.path.join(target_dir, target)
+
+                    # Recursively create leading components of target
+                    dest = self._make_leading_paths(target_src, mode=mode)
+                    dest = os.path.normpath(dest)
+
+                    self.log_debug("Making symlink '%s' -> '%s'" %
+                                   (abs_path, target))
+                    os.symlink(target, abs_path)
+                else:
+                    self.log_debug("Making directory %s" % abs_path)
+                    os.mkdir(abs_path, mode)
+                    dest = src_path
+
+        return dest
+
+    def _check_path(self, src, path_type, dest=None, force=False):
         """Check a new destination path in the archive.
 
             Since it is possible for multiple plugins to collect the same
@@ -185,11 +269,15 @@ class FileCacheArchive(Archive):
             :param src: the source path to be copied to the archive
             :param path_type: the type of object to be copied
             :param dest: an optional destination path
+            :param force: force file creation even if the path exists
             :returns: An absolute destination path if the path should be
                       copied now or `None` otherwise
         """
         dest = dest or self.dest_path(src)
-        dest_dir = os.path.split(dest)[0]
+        if path_type == P_DIR:
+            dest_dir = dest
+        else:
+            dest_dir = os.path.split(dest)[0]
         if not dest_dir:
             return dest
 
@@ -198,15 +286,19 @@ class FileCacheArchive(Archive):
             raise ValueError("path '%s' exists and is not a directory" %
                              dest_dir)
         elif not os.path.exists(dest_dir):
-            self._makedirs(dest_dir)
+            src_dir = src if path_type == P_DIR else os.path.split(src)[0]
+            self._make_leading_paths(src_dir)
 
         def is_special(mode):
             return any([
-                stat.ISBLK(mode),
-                stat.ISCHR(mode),
-                stat.ISFIFO(mode),
-                stat.ISSOCK(mode)
+                stat.S_ISBLK(mode),
+                stat.S_ISCHR(mode),
+                stat.S_ISFIFO(mode),
+                stat.S_ISSOCK(mode)
             ])
+
+        if force:
+            return dest
 
         # Check destination path presence and type
         if os.path.exists(dest):
@@ -246,16 +338,17 @@ class FileCacheArchive(Archive):
                         pass
                     else:
                         self.log_info("caught '%s' copying '%s'" % (e, src))
-                try:
-                    shutil.copystat(src, dest)
-                except OSError:
-                    # SELinux xattrs in /proc and /sys throw this
-                    pass
+                # copy file attributes, skip SELinux xattrs for /sys and /proc
                 try:
                     stat = os.stat(src)
+                    if src.startswith("/sys/") or src.startswith("/proc/"):
+                        shutil.copymode(src, dest)
+                        os.utime(dest, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                    else:
+                        shutil.copystat(src, dest)
                     os.chown(dest, stat.st_uid, stat.st_gid)
                 except Exception as e:
-                    self.log_debug("caught '%s' setting ownership of '%s'"
+                    self.log_debug("caught '%s' setting attributes of '%s'"
                                    % (e, dest))
                 file_name = "'%s'" % src
             else:
@@ -270,15 +363,17 @@ class FileCacheArchive(Archive):
             self.log_debug("added %s to FileCacheArchive '%s'" %
                            (file_name, self._archive_root))
 
-    def add_string(self, content, dest):
+    def add_string(self, content, dest, mode='w'):
         with self._path_lock:
             src = dest
 
-            dest = self._check_path(dest, P_FILE)
-            if not dest:
-                return
+            # add_string() is a special case: it must always take precedence
+            # over any exixting content in the archive, since it is used by
+            # the Plugin postprocessing hooks to perform regex substitution
+            # on file content.
+            dest = self._check_path(dest, P_FILE, force=True)
 
-            f = codecs.open(dest, 'w', encoding='utf-8')
+            f = codecs.open(dest, mode, encoding='utf-8')
             if isinstance(content, bytes):
                 content = content.decode('utf8', 'ignore')
             f.write(content)
@@ -303,6 +398,7 @@ class FileCacheArchive(Archive):
                            % (dest, self._archive_root))
 
     def add_link(self, source, link_name):
+        self.log_debug("adding symlink at '%s' -> '%s'" % (link_name, source))
         with self._path_lock:
             dest = self._check_path(link_name, P_LINK)
             if not dest:
@@ -310,15 +406,77 @@ class FileCacheArchive(Archive):
 
             if not os.path.lexists(dest):
                 os.symlink(source, dest)
-            self.log_debug("added symlink at '%s' to '%s' in archive '%s'"
-                           % (dest, source, self._archive_root))
+                self.log_debug("added symlink at '%s' to '%s' in archive '%s'"
+                               % (dest, source, self._archive_root))
+
+        # Follow-up must be outside the path lock: we recurse into
+        # other monitor methods that will attempt to reacquire it.
+
+        self.log_debug("Link follow up: source=%s link_name=%s dest=%s" %
+                       (source, link_name, dest))
+
+        source_dir = os.path.dirname(link_name)
+        host_path_name = os.path.realpath(os.path.join(source_dir, source))
+        dest_path_name = self.dest_path(host_path_name)
+
+        def is_loop(link_name, source):
+            """Return ``True`` if the symbolic link ``link_name`` is part
+                of a file system loop, or ``False`` otherwise.
+            """
+            link_dir = os.path.dirname(link_name)
+            if not os.path.isabs(source):
+                source = os.path.realpath(os.path.join(link_dir, source))
+            link_name = os.path.realpath(link_name)
+
+            # Simple a -> a loop
+            if link_name == source:
+                return True
+
+            # Find indirect loops (a->b-a) by stat()ing the first step
+            # in the symlink chain
+            try:
+                os.stat(link_name)
+            except OSError as e:
+                if e.errno == 40:
+                    return True
+                raise
+            return False
+
+        if not os.path.exists(dest_path_name):
+            if os.path.islink(host_path_name):
+                # Normalised path for the new link_name
+                link_name = host_path_name
+                # Containing directory for the new link
+                dest_dir = os.path.dirname(link_name)
+                # Relative source path of the new link
+                source = os.path.join(dest_dir, os.readlink(host_path_name))
+                source = os.path.relpath(source, dest_dir)
+                if is_loop(link_name, source):
+                    self.log_debug("Link '%s' - '%s' loops: skipping..." %
+                                   (link_name, source))
+                    return
+                self.log_debug("Adding link %s -> %s for link follow up" %
+                               (link_name, source))
+                self.add_link(source, link_name)
+            elif os.path.isdir(host_path_name):
+                self.log_debug("Adding dir %s for link follow up" % source)
+                self.add_dir(host_path_name)
+            elif os.path.isfile(host_path_name):
+                self.log_debug("Adding file %s for link follow up" % source)
+                self.add_file(host_path_name)
+            else:
+                self.log_debug("No link follow up: source=%s link_name=%s" %
+                               (source, link_name))
+        self.log_debug("leaving add_link()")
 
     def add_dir(self, path):
+        """Create a directory in the archive.
+
+            :param path: the path in the host file system to add
+        """
+        # Establish path structure
         with self._path_lock:
-            dest = self._check_path(path, P_DIR)
-            if not dest:
-                return
-            self.makedirs(path)
+            self._check_path(path, P_DIR)
 
     def add_node(self, path, mode, device):
         dest = self._check_path(path, P_NODE)
@@ -336,9 +494,6 @@ class FileCacheArchive(Archive):
                 raise e
             shutil.copystat(path, dest)
 
-    def _makedirs(self, path, mode=0o700):
-        os.makedirs(path, mode)
-
     def name_max(self):
         if 'PC_NAME_MAX' in os.pathconf_names:
             pc_name_max = os.pathconf_names['PC_NAME_MAX']
@@ -353,17 +508,17 @@ class FileCacheArchive(Archive):
         return self._archive_root
 
     def makedirs(self, path, mode=0o700):
-        dest = self._check_path(path, P_DIR)
-        if not dest:
-            return
+        """Create path, including leading components.
 
-        self._makedirs(self.dest_path(path))
+            Used by sos.sosreport to set up sos_* directories.
+        """
+        os.makedirs(os.path.join(self._archive_root, path), mode=mode)
         self.log_debug("created directory at '%s' in FileCacheArchive '%s'"
                        % (path, self._archive_root))
 
     def open_file(self, path):
         path = self.dest_path(path)
-        return codecs.open(path, "r", encoding='utf-8')
+        return codecs.open(path, "r", encoding='utf-8', errors='ignore')
 
     def cleanup(self):
         if os.path.isdir(self._archive_root):
@@ -378,11 +533,64 @@ class FileCacheArchive(Archive):
                       os.stat(self._archive_name).st_size))
         self.method = method
         try:
-            return self._compress()
+            res = self._compress()
         except Exception as e:
             exp_msg = "An error occurred compressing the archive: "
             self.log_error("%s %s" % (exp_msg, e))
             return self.name()
+
+        if self.enc_opts['encrypt']:
+            try:
+                return self._encrypt(res)
+            except Exception as e:
+                exp_msg = "An error occurred encrypting the archive:"
+                self.log_error("%s %s" % (exp_msg, e))
+                return res
+        else:
+            return res
+
+    def _encrypt(self, archive):
+        """Encrypts the compressed archive using GPG.
+
+        If encryption fails for any reason, it should be logged by sos but not
+        cause execution to stop. The assumption is that the unencrypted archive
+        would still be of use to the user, and/or that the end user has another
+        means of securing the archive.
+
+        Returns the name of the encrypted archive, or raises an exception to
+        signal that encryption failed and the unencrypted archive name should
+        be used.
+        """
+        arc_name = archive.replace("sosreport-", "secured-sosreport-")
+        arc_name += ".gpg"
+        enc_cmd = "gpg --batch -o %s " % arc_name
+        env = None
+        if self.enc_opts["key"]:
+            # need to assume a trusted key here to be able to encrypt the
+            # archive non-interactively
+            enc_cmd += "--trust-model always -e -r %s " % self.enc_opts["key"]
+            enc_cmd += archive
+        if self.enc_opts["password"]:
+            # prevent change of gpg options using a long password, but also
+            # prevent the addition of quote characters to the passphrase
+            passwd = "%s" % self.enc_opts["password"].replace('\'"', '')
+            env = {"sos_gpg": passwd}
+            enc_cmd += "-c --passphrase-fd 0 "
+            enc_cmd = "/bin/bash -c \"echo $sos_gpg | %s\"" % enc_cmd
+            enc_cmd += archive
+        r = sos_get_command_output(enc_cmd, timeout=0, env=env)
+        if r["status"] == 0:
+            return arc_name
+        elif r["status"] == 2:
+            if self.enc_opts["key"]:
+                msg = "Specified key not in keyring"
+            else:
+                msg = "Could not read passphrase"
+        else:
+            # TODO: report the actual error from gpg. Currently, we cannot as
+            # sos_get_command_output() does not capture stderr
+            msg = "gpg exited with code %s" % r["status"]
+        raise Exception(msg)
 
 
 # Compatibility version of the tarfile.TarFile class. This exists to allow
@@ -462,8 +670,9 @@ class TarFileArchive(FileCacheArchive):
     method = None
     _with_selinux_context = False
 
-    def __init__(self, name, tmpdir, policy, threads):
-        super(TarFileArchive, self).__init__(name, tmpdir, policy, threads)
+    def __init__(self, name, tmpdir, policy, threads, enc_opts):
+        super(TarFileArchive, self).__init__(name, tmpdir, policy, threads,
+                                             enc_opts)
         self._suffix = "tar"
         self._archive_name = os.path.join(tmpdir, self.name())
 

@@ -22,7 +22,6 @@ from sos import SoSOptions
 sys.path.insert(0, "/usr/share/rhn/")
 try:
     from up2date_client import up2dateAuth
-    from up2date_client import config
     from rhn import rpclib
 except ImportError:
     # might fail if non-RHEL
@@ -45,6 +44,7 @@ class RedHatPolicy(LinuxPolicy):
     _host_sysroot = '/'
     default_scl_prefix = '/opt/rh'
     name_pattern = 'friendly'
+    init = 'systemd'
 
     def __init__(self, sysroot=None):
         super(RedHatPolicy, self).__init__(sysroot=sysroot)
@@ -192,6 +192,11 @@ ENV_HOST_SYSROOT = 'HOST'
 _opts_verify = SoSOptions(verify=True)
 _opts_all_logs = SoSOptions(all_logs=True)
 _opts_all_logs_verify = SoSOptions(all_logs=True, verify=True)
+_opts_all_logs_no_lsof = SoSOptions(all_logs=True,
+                                    plugopts=['process.lsof=off'])
+_cb_plugs = ['abrt', 'block', 'boot', 'dnf', 'dracut', 'filesys', 'grub2',
+             'hardware', 'host', 'kernel', 'logs', 'lvm2', 'memory', 'rpm',
+             'process', 'systemd', 'yum', 'xfs']
 
 RHEL_RELEASE_STR = "Red Hat Enterprise Linux"
 
@@ -209,6 +214,12 @@ RHOCP_DESC = "OpenShift Container Platform by Red Hat"
 
 RH_SATELLITE = "satellite"
 RH_SATELLITE_DESC = "Red Hat Satellite"
+SAT_OPTS = SoSOptions(verify=True, plugopts=['apache.log=on'])
+
+CB = "cantboot"
+CB_DESC = "For use when normal system startup fails"
+CB_OPTS = SoSOptions(verify=True, all_logs=True, onlyplugins=_cb_plugs)
+CB_NOTE = ("Data collection will be limited to a boot-affecting scope")
 
 NOTE_SIZE = "This preset may increase report size"
 NOTE_TIME = "This preset may increase report run time"
@@ -219,12 +230,26 @@ rhel_presets = {
                         opts=_opts_verify),
     RHEL: PresetDefaults(name=RHEL, desc=RHEL_DESC),
     RHOSP: PresetDefaults(name=RHOSP, desc=RHOSP_DESC, note=NOTE_SIZE,
-                          opts=_opts_all_logs),
+                          opts=_opts_all_logs_no_lsof),
     RHOCP: PresetDefaults(name=RHOCP, desc=RHOCP_DESC, note=NOTE_SIZE_TIME,
                           opts=_opts_all_logs_verify),
     RH_SATELLITE: PresetDefaults(name=RH_SATELLITE, desc=RH_SATELLITE_DESC,
-                                 note=NOTE_TIME, opts=_opts_verify),
+                                 note=NOTE_TIME, opts=SAT_OPTS),
+    CB: PresetDefaults(name=CB, desc=CB_DESC, note=CB_NOTE, opts=CB_OPTS)
 }
+
+# Legal disclaimer text for Red Hat products
+disclaimer_text = """
+Any information provided to %(vendor)s will be treated in \
+accordance with the published support policies at:\n
+  %(vendor_url)s
+
+The generated archive may contain data considered sensitive \
+and its content should be reviewed by the originating \
+organization before being passed to any third party.
+
+No changes will be made to system configuration.
+"""
 
 
 class RHELPolicy(RedHatPolicy):
@@ -239,18 +264,7 @@ applications.
 An archive containing the collected information will be \
 generated in %(tmpdir)s and may be provided to a %(vendor)s \
 support representative.
-
-Any information provided to %(vendor)s will be treated in \
-accordance with the published support policies at:\n
-  %(vendor_url)s
-
-The generated archive may contain data considered sensitive \
-and its content should be reviewed by the originating \
-organization before being passed to any third party.
-
-No changes will be made to system configuration.
-%(vendor_text)s
-""")
+""" + disclaimer_text + "%(vendor_text)s\n")
 
     def __init__(self, sysroot=None):
         super(RHELPolicy, self).__init__(sysroot=sysroot)
@@ -276,7 +290,7 @@ No changes will be made to system configuration.
                 if line.startswith("NAME"):
                     (name, value) = line.split("=")
                     value = value.strip("\"'")
-                    if value.startswith(RHEL_RELEASE_STR):
+                    if value.startswith(cls.distro):
                         return True
         return False
 
@@ -292,13 +306,14 @@ No changes will be made to system configuration.
                 return 6
             elif pkgname[0] == "7":
                 return 7
+            elif pkgname[0] == "8":
+                return 8
         except Exception:
             pass
         return False
 
     def rhn_username(self):
         try:
-            # cfg = config.initUp2dateConfig()
             rhn_username = rpclib.xmlrpclib.loads(
                 up2dateAuth.getSystemId())[0][0]['username']
             return rhn_username.encode('utf-8', 'ignore')
@@ -313,13 +328,27 @@ No changes will be made to system configuration.
         # Package based checks
         if self.pkg_by_name("satellite-common") is not None:
             return self.find_preset(RH_SATELLITE)
+        if self.pkg_by_name("rhosp-release") is not None:
+            return self.find_preset(RHOSP)
 
         # Vanilla RHEL is default
         return self.find_preset(RHEL)
 
 
+class CentOsPolicy(RHELPolicy):
+    distro = "CentOS"
+    vendor = "CentOS"
+    vendor_url = "http://www.centos.org/"
+
+
 ATOMIC = "atomic"
 ATOMIC_RELEASE_STR = "Atomic"
+ATOMIC_DESC = "Red Hat Enterprise Linux Atomic Host"
+
+atomic_presets = {
+    ATOMIC: PresetDefaults(name=ATOMIC, desc=ATOMIC_DESC, note=NOTE_TIME,
+                           opts=_opts_verify)
+}
 
 
 class RedHatAtomicPolicy(RHELPolicy):
@@ -331,16 +360,11 @@ information from this %(distro)s system.
 An archive containing the collected information will be \
 generated in %(tmpdir)s and may be provided to a %(vendor)s \
 support representative.
+""" + disclaimer_text + "%(vendor_text)s\n")
 
-Any information provided to %(vendor)s will be treated in \
-accordance with the published support policies at:\n
-  %(vendor_url)s
-
-The generated archive may contain data considered sensitive \
-and its content should be reviewed by the originating \
-organization before being passed to any third party.
-%(vendor_text)s
-""")
+    def __init__(self, sysroot=None):
+        super(RedHatAtomicPolicy, self).__init__(sysroot=sysroot)
+        self.register_presets(atomic_presets)
 
     @classmethod
     def check(cls):
@@ -358,7 +382,49 @@ organization before being passed to any third party.
         return atomic
 
     def probe_preset(self):
-        return ATOMIC
+        if self.pkg_by_name('atomic-openshift'):
+            return self.find_preset(RHOCP)
+
+        return self.find_preset(ATOMIC)
+
+
+class RedHatCoreOSPolicy(RHELPolicy):
+    distro = "Red Hat CoreOS"
+    msg = _("""\
+This command will collect diagnostic and configuration \
+information from this %(distro)s system.
+
+An archive containing the collected information will be \
+generated in %(tmpdir)s and may be provided to a %(vendor)s \
+support representative.
+""" + disclaimer_text + "%(vendor_text)s\n")
+
+    def __init__(self, sysroot=None):
+        super(RedHatCoreOSPolicy, self).__init__(sysroot=sysroot)
+
+    @classmethod
+    def check(cls):
+        coreos = False
+        if ENV_HOST_SYSROOT not in os.environ:
+            return coreos
+        host_release = os.environ[ENV_HOST_SYSROOT] + cls._redhat_release
+        try:
+            for line in open(host_release, 'r').read().splitlines():
+                coreos |= 'Red Hat CoreOS' in line
+        except IOError:
+            pass
+        return coreos
+
+    def probe_preset(self):
+        # As of the creation of this policy, RHCOS is only available for
+        # RH OCP environments.
+        return self.find_preset(RHOCP)
+
+
+class CentOsAtomicPolicy(RedHatAtomicPolicy):
+    distro = "CentOS Atomic Host"
+    vendor = "CentOS"
+    vendor_url = "http://www.centos.org/"
 
 
 class FedoraPolicy(RedHatPolicy):
@@ -380,6 +446,5 @@ class FedoraPolicy(RedHatPolicy):
         pkg = self.pkg_by_name("fedora-release") or \
             self.all_pkgs_by_name_regex("fedora-release-.*")[-1]
         return int(pkg["version"])
-
 
 # vim: set et ts=4 sw=4 :

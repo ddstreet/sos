@@ -25,7 +25,7 @@ class Filesys(Plugin, DebianPlugin, UbuntuPlugin):
     def setup(self):
         self.add_copy_spec([
             "/proc/fs/",
-            "/proc/mounts"
+            "/proc/mounts",
             "/proc/filesystems",
             "/proc/self/mounts",
             "/proc/self/mountinfo",
@@ -48,12 +48,12 @@ class Filesys(Plugin, DebianPlugin, UbuntuPlugin):
         if self.get_option('dumpe2fs'):
             dumpe2fs_opts = ''
         mounts = '/proc/mounts'
-        ext_fs_regex = r"^(/dev/.+).+ext[234]\s+"
+        ext_fs_regex = r"^(/dev/\S+).+ext[234]\s+"
         for dev in self.do_regex_find_all(ext_fs_regex, mounts):
-                self.add_cmd_output("dumpe2fs %s %s" % (dumpe2fs_opts, dev))
+            self.add_cmd_output("dumpe2fs %s %s" % (dumpe2fs_opts, dev))
 
-                if self.get_option('frag'):
-                    self.add_cmd_output("e2freefrag %s" % (dev))
+            if self.get_option('frag'):
+                self.add_cmd_output("e2freefrag %s" % (dev))
 
     def postproc(self):
         self.do_file_sub(

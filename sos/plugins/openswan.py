@@ -17,9 +17,10 @@ class Openswan(Plugin, RedHatPlugin, DebianPlugin, UbuntuPlugin):
 
     plugin_name = 'openswan'
     profiles = ('network', 'security')
-    option_list = [("ipsec-barf",
-                    "collect the output of the ipsec barf command",
-                    "slow", False)]
+    option_list = [
+        ("ipsec-barf", "collect the output of the ipsec barf command",
+         "slow", False)
+    ]
 
     files = ('/etc/ipsec.conf',)
     packages = ('openswan', 'libreswan')
@@ -36,6 +37,11 @@ class Openswan(Plugin, RedHatPlugin, DebianPlugin, UbuntuPlugin):
         if self.get_option("ipsec-barf"):
             self.add_cmd_output("ipsec barf")
 
-        self.add_forbidden_path("/etc/ipsec.d/key[3-4].db")
+        self.add_forbidden_path([
+            '/etc/ipsec.secrets',
+            '/etc/ipsec.secrets.d/*',
+            '/etc/ipsec.d/*.db',
+            '/etc/ipsec.d/*.secrets'
+        ])
 
 # vim: set et ts=4 sw=4 :

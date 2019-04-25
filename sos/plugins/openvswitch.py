@@ -49,6 +49,8 @@ class OpenVSwitch(Plugin):
             "ovs-dpctl -s show",
             # Capture the in-kernel flow information if it exists
             "ovs-dpctl dump-flows -m",
+            # Capture the flow information also for offloaded rules
+            "ovs-dpctl dump-flows type=offloaded -m",
             # The '-t 5' adds an upper bound on how long to wait to connect
             # to the Open vSwitch server, avoiding hangs when running sos.
             "ovs-vsctl -t 5 show",
@@ -83,6 +85,8 @@ class OpenVSwitch(Plugin):
             "ovs-vsctl list Open_vSwitch",
             # Capture DPDK datapath packet counters and config
             "ovs-appctl dpctl/show -s",
+            # Capture DPDK datapath flows
+            "ovs-appctl dpctl/dump-flows",
             # Capture DPDK queue to pmd mapping
             "ovs-appctl dpif-netdev/pmd-rxq-show",
             # Capture DPDK pmd stats
@@ -106,7 +110,8 @@ class OpenVSwitch(Plugin):
                     "ovs-ofctl dump-ports %s" % br,
                     "ovs-ofctl queue-get-config %s" % br,
                     "ovs-ofctl queue-stats %s" % br,
-                    "ovs-ofctl show %s" % br
+                    "ovs-ofctl show %s" % br,
+                    "ovs-appctl fdb/stats-show %s" % br
                 ])
 
                 # Flow protocols currently supported

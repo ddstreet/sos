@@ -39,12 +39,10 @@ class Ovirt(Plugin, RedHatPlugin):
     DB_PASS_FILES = re.compile(
         flags=re.VERBOSE,
         pattern=r"""
-        ^
-        /etc/
+        ^/etc/
         (rhevm|ovirt-engine|ovirt-engine-dwh)/
         (engine.conf|ovirt-engine-dwhd.conf)
-        (\.d/.+.conf.*?)?
-        $
+        (\.d/.+.conf.*?)?$
         """
     )
 
@@ -57,7 +55,9 @@ class Ovirt(Plugin, RedHatPlugin):
         ('jbosstrace', 'Enable oVirt Engine JBoss stack trace collection',
          '', True),
         ('sensitive_keys', 'Sensitive keys to be masked',
-         '', DEFAULT_SENSITIVE_KEYS)
+         '', DEFAULT_SENSITIVE_KEYS),
+        ('heapdump', 'Collect heap dumps from /var/log/ovirt-engine/dump/',
+         '', False)
     ]
 
     def setup(self):
@@ -81,8 +81,16 @@ class Ovirt(Plugin, RedHatPlugin):
             '/etc/rhevm/.pgpass'
         ])
 
-        # Copy all engine tunables and domain information
-        self.add_cmd_output("engine-config --all")
+        if not self.get_option('heapdump'):
+            self.add_forbidden_path('/var/log/ovirt-engine/dump')
+            self.add_cmd_output('ls -l /var/log/ovirt-engine/dump/')
+
+        self.add_cmd_output([
+            # Copy all engine tunables and domain information
+            "engine-config --all",
+            # clearer diff from factory defaults (only on ovirt>=4.2.8)
+            "engine-config -d"
+        ])
 
         # 3.x line uses engine-manage-domains, 4.x uses ovirt-aaa-jdbc-tool
         manage_domains = 'engine-manage-domains'

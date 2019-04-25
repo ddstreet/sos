@@ -10,9 +10,12 @@ sosreport \- Collect and package diagnostic and support data
           [-a|--alloptions] [-v|--verbose]\fR
           [-k plug.opt|--plugin-option plug.opt]\fR
           [--no-report] [--config-file conf]\fR
-          [--batch] [--build] [--debug]\fR
-          [--label label] [--case-id id] [--ticket-number nr]
-          [--threads threads]
+          [--preset preset] [--add-preset add_preset]\fR
+          [--del-preset del_preset] [--desc description]\fR
+          [--batch] [--build] [--debug] [--dry-run]\fR
+          [--label label] [--case-id id] [--ticket-number nr]\fR
+          [--threads threads]\fR
+          [--plugin-timeout TIMEOUT]\fR
           [-s|--sysroot SYSROOT]\fR
           [-c|--chroot {auto|always|never}\fR
           [--tmp-dir directory]\fR
@@ -22,6 +25,8 @@ sosreport \- Collect and package diagnostic and support data
           [--log-size]\fR
           [--all-logs]\fR
           [-z|--compression-type method]\fR
+          [--encrypt-key KEY]\fR
+          [--encrypt-pass PASS]\fR
           [--experimental]\fR
           [-h|--help]\fR
 
@@ -75,6 +80,37 @@ Disable HTML/XML report writing.
 .B \--config-file CONFIG
 Specify alternate configuration file.
 .TP
+.B \--preset PRESET
+Specify an existing preset to use for sos options.
+
+Presets are pre-configured sets of options for both sos and sos plugins. For
+example a preset may enable a certain set of plugins, disable others, or enable
+specific plugin options. They may also specify sos options such as log-size or
+package verification.
+
+User defined presets are saved under /var/lib/sos/presets as JSON-formatted files.
+.TP
+.B \--add-preset ADD_PRESET [options]
+Add a preset with name ADD_PRESET that enables [options] when called.
+
+For example, 'sosreport --add-preset mypreset --log-size=50 -n logs' will enable
+a user to run 'sosreport --preset mypreset' that sets the maximum log size to
+50 and disables the logs plugin.
+
+Note: to set a description for the preset that is displayed with \fB--list-presets\fR
+use the \fB--desc\fR option.
+.TP
+.B \--del-preset DEL_PRESET
+Deletes the preset with name DEL_PRESET from the filesystem so that it can no
+longer be used.
+.TP
+.B \--list-presets
+Display a list of available presets and what options they carry.
+.TP
+.B \--desc DESCRIPTION
+When using \fB--add-preset\fR use this option to add a description of the preset
+that will be displayed when using \fB--list-presets\fR.
+.TP
 .B \-s, \--sysroot SYSROOT
 Specify an alternate root file system path. Useful for collecting
 reports from containers and images.
@@ -120,6 +156,32 @@ increase the size of reports.
 .B \-z, \--compression-type METHOD
 Override the default compression type specified by the active policy.
 .TP
+.B \--encrypt-key KEY
+Encrypts the resulting archive that sosreport produces using GPG. KEY must be
+an existing key in the user's keyring as GPG does not allow for keyfiles.
+KEY can be any value accepted by gpg's 'recipient' option.
+
+Note that the user running sosreport must match the user owning the keyring
+from which keys will be obtained. In particular this means that if sudo is
+used to run sosreport, the keyring must also be set up using sudo
+(or direct shell access to the account).
+
+Users should be aware that encrypting the final archive will result in sos
+using double the amount of temporary disk space - the encrypted archive must be
+written as a separate, rather than replacement, file within the temp directory
+that sos writes the archive to. However, since the encrypted archive will be
+the same size as the original archive, there is no additional space consumption
+once the temporary directory is removed at the end of execution.
+
+This means that only the encrypted archive is present on disk after sos
+finishes running.
+
+If encryption fails for any reason, the original unencrypted archive is
+preserved instead.
+.TP
+.B \--encrypt-pass PASS
+The same as \--encrypt-key, but use the provided PASS for symmetric encryption
+rather than key-pair encryption.
 .TP
 .B \--batch
 Generate archive without prompting for interactive input.
@@ -134,6 +196,18 @@ alphanumeric characters.
 .TP
 .B \--threads THREADS
 Specify the number of threads sosreport will use for concurrency. Defaults to 4.
+.TP
+.B \--plugin-timeout TIMEOUT
+Specify a timeout in seconds to allow each plugin to run for. A value of 0
+means no timeout will be set.
+
+Note that this options sets the timeout for all plugins. If you want to set
+a timeout for a specific plugin, use the 'timeout' plugin option available to
+all plugins - e.g. '-k logs.timeout=600'.
+
+The plugin-specific timeout option will override this option. For example, using
+\'--plugin-timeout=60 -k logs.timeout=600\' will set a timeout of 600 seconds for
+the logs plugin and 60 seconds for all other enabled plugins.
 .TP
 .B \--case-id NUMBER
 Specify a case identifier to associate with the archive.
@@ -153,6 +227,12 @@ archive as a temporary file or directory tree.
 Enable interactive debugging using the python debugger. Exceptions in
 sos or plug-in code will cause a trap to the pdb shell.
 .TP
+.B \--dry-run
+Execute plugins as normal, but do not collect any file content, command
+output, or string data from the system. The resulting logs may be used
+to understand the actions that sos would have taken without the dry run
+option.
+.TP
 .B \--experimental
 Enable plugins marked as experimental. Experimental plugins may not have
 been tested for this port or may still be under active development.
@@ -164,7 +244,7 @@ Display usage message.
 Bryn M. Reeves <bmr@redhat.com>
 .fi
 .SH AUTHORS & CONTRIBUTORS
-See \fBAUTHORS\fR file in /usr/share/doc/sosreport.
+See \fBAUTHORS\fR file in the package documentation.
 .nf
 .SH TRANSLATIONS
 .nf

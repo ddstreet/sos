@@ -1,16 +1,10 @@
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+# This file is part of the sos project: https://github.com/sosreport/sos
+#
+# This copyrighted material is made available to anyone wishing to use,
+# modify, copy, or redistribute it subject to the terms and conditions of
+# version 2 of the GNU General Public License.
+#
+# See the LICENSE file in the source distribution for further information.
 
 from sos.plugins import Plugin, RedHatPlugin
 
@@ -51,9 +45,10 @@ class Unpackaged(Plugin, RedHatPlugin):
                             path = os.path.abspath(os.readlink(path))
                     except Exception:
                         continue
-                    file_list.append(path)
+                    file_list.append(os.path.realpath(path))
                 for name in dirs:
-                    file_list.append(os.path.join(root, name))
+                    file_list.append(os.path.realpath(
+                                     os.path.join(root, name)))
 
             return file_list
 
@@ -68,8 +63,13 @@ class Unpackaged(Plugin, RedHatPlugin):
                     expanded.append(f)
             return expanded
 
+        # Check command predicate to avoid costly processing
+        if not self.test_predicate(cmd=True):
+            return
+
         all_fsystem = []
-        all_frpm = set(self.policy.mangle_package_path(
+        all_frpm = set(os.path.realpath(x)
+                       for x in self.policy.mangle_package_path(
                        self.policy.package_manager.files))
 
         for d in get_env_path_list():

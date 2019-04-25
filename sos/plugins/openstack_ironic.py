@@ -89,7 +89,7 @@ class OpenStackIronic(Plugin):
         protect_keys = [
             "dns_passkey", "memcache_secret_key", "rabbit_password",
             "password", "qpid_password", "admin_password", "ssl_key_password",
-            "os_password"
+            "os_password", "transport_url"
         ]
         connection_keys = ["connection", "sql_connection"]
 
@@ -118,11 +118,7 @@ class DebianIronic(OpenStackIronic, DebianPlugin, UbuntuPlugin):
 
 class RedHatIronic(OpenStackIronic, RedHatPlugin):
 
-    packages = [
-        'openstack-ironic-api',
-        'openstack-ironic-common',
-        'openstack-ironic-conductor',
-    ]
+    packages = ('openstack-selinux',)
 
     discoverd_packages = [
         'openstack-ironic-discoverd',
