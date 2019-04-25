@@ -35,11 +35,17 @@ class Systemd(Plugin, RedHatPlugin, DebianPlugin, UbuntuPlugin):
             "systemctl list-units",
             "systemctl list-units --failed",
             "systemctl list-unit-files",
+            "systemctl list-jobs",
+            "systemctl list-dependencies",
+            "systemctl list-timers --all",
+            "systemctl list-machines",
             "systemctl show-environment",
             "systemd-delta",
             "systemd-analyze",
             "systemd-analyze blame",
             "systemd-analyze dump",
+            "systemd-resolve --status",
+            "systemd-resolve --statistics",
             "journalctl --list-boots",
             "ls -lR /lib/systemd",
             "timedatectl"
@@ -60,9 +66,10 @@ class Systemd(Plugin, RedHatPlugin, DebianPlugin, UbuntuPlugin):
             "/run/systemd/seats",
             "/run/systemd/sessions",
             "/run/systemd/system",
-            "/run/systemd/users"
+            "/run/systemd/users",
             "/etc/modules-load.d/*.conf",
             "/etc/yum/protected.d/systemd.conf"
         ])
+        self.add_forbidden_path('/dev/null')
 
 # vim: set et ts=4 sw=4 :

@@ -60,7 +60,7 @@ class OpenStackSwift(Plugin):
             "ldap_dns_password", "neutron_admin_password", "rabbit_password",
             "qpid_password", "powervm_mgr_passwd", "virtual_power_host_pass",
             "xenapi_connection_password", "password", "host_password",
-            "vnc_password", "admin_password"
+            "vnc_password", "admin_password", "transport_url"
         ]
         connection_keys = ["connection", "sql_connection"]
 
@@ -91,14 +91,6 @@ class DebianSwift(OpenStackSwift, DebianPlugin, UbuntuPlugin):
 
 class RedHatSwift(OpenStackSwift, RedHatPlugin):
 
-    packages = (
-        'openstack-swift',
-        'openstack-swift-account',
-        'openstack-swift-container',
-        'openstack-swift-object',
-        'openstack-swift-proxy',
-        'swift',
-        'python-swiftclient'
-    )
+    packages = ('openstack-selinux',)
 
 # vim: set et ts=4 sw=4 :

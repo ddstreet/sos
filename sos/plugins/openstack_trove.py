@@ -53,7 +53,7 @@ class OpenStackTrove(Plugin):
         protect_keys = [
             "default_password_length", "notifier_queue_password",
             "rabbit_password", "replication_password", "admin_password",
-            "dns_passkey"
+            "dns_passkey", "transport_url"
         ]
         connection_keys = ["connection"]
 
@@ -83,7 +83,7 @@ class DebianTrove(OpenStackTrove, DebianPlugin, UbuntuPlugin):
 
 class RedHatTrove(OpenStackTrove, RedHatPlugin):
 
-    packages = ['openstack-trove']
+    packages = ('openstack-selinux',)
 
     def setup(self):
         super(RedHatTrove, self).setup()

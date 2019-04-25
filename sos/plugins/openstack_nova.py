@@ -33,12 +33,7 @@ class OpenStackNova(Plugin):
             "systemctl status openstack-nova-api.service"
         )
 
-        container_status = self.get_command_output("docker ps")
-        in_container = False
-        if container_status['status'] == 0:
-            for line in container_status['output'].splitlines():
-                if line.endswith("nova_api"):
-                    in_container = True
+        in_container = self.running_in_container()
 
         if (service_status['status'] == 0) or in_container:
             nova_config = ""
@@ -75,7 +70,7 @@ class OpenStackNova(Plugin):
                 self.add_cmd_output("nova service-list")
                 self.add_cmd_output("openstack flavor list --long")
                 self.add_cmd_output("nova network-list")
-                self.add_cmd_output("nova list")
+                self.add_cmd_output("nova list --all-tenants")
                 self.add_cmd_output("nova agent-list")
                 self.add_cmd_output("nova version-list")
                 self.add_cmd_output("nova hypervisor-list")
@@ -131,6 +126,15 @@ class OpenStackNova(Plugin):
         if self.get_option("verify"):
             self.add_cmd_output("rpm -V %s" % ' '.join(self.packages))
 
+    def running_in_container(self):
+        for runtime in ["docker", "podman"]:
+            container_status = self.get_command_output(runtime + " ps")
+            if container_status['status'] == 0:
+                for line in container_status['output'].splitlines():
+                    if line.endswith("nova_api"):
+                        return True
+        return False
+
     def apply_regex_sub(self, regexp, subst):
         self.do_path_regex_sub("/etc/nova/*", regexp, subst)
         self.do_path_regex_sub(
@@ -153,7 +157,7 @@ class OpenStackNova(Plugin):
             "xenapi_connection_password", "password", "host_password",
             "vnc_password", "admin_password", "connection_password",
             "memcache_secret_key", "s3_secret_key",
-            "metadata_proxy_shared_secret", "fixed_key"
+            "metadata_proxy_shared_secret", "fixed_key", "transport_url"
         ]
         connection_keys = ["connection", "sql_connection"]
 
@@ -195,10 +199,6 @@ class DebianNova(OpenStackNova, DebianPlugin, UbuntuPlugin):
         'python-novnc'
     )
 
-    def check_enabled(self):
-        self.nova = self.is_installed("nova-common")
-        return self.nova
-
     def setup(self):
         super(DebianNova, self).setup()
         self.add_copy_spec([
@@ -210,27 +210,7 @@ class DebianNova(OpenStackNova, DebianPlugin, UbuntuPlugin):
 class RedHatNova(OpenStackNova, RedHatPlugin):
 
     nova = False
-    packages = (
-        'openstack-nova-common',
-        'openstack-nova-network',
-        'openstack-nova-conductor',
-        'openstack-nova-conductor',
-        'openstack-nova-scheduler',
-        'openstack-nova-console',
-        'openstack-nova-novncproxy',
-        'openstack-nova-compute',
-        'openstack-nova-api',
-        'openstack-nova-cert',
-        'openstack-nova-cells',
-        'openstack-nova-objectstore',
-        'python-nova',
-        'python-novaclient',
-        'novnc'
-    )
-
-    def check_enabled(self):
-        self.nova = self.is_installed("openstack-nova-common")
-        return self.nova
+    packages = ('openstack-selinux',)
 
     def setup(self):
         super(RedHatNova, self).setup()
@@ -241,5 +221,15 @@ class RedHatNova(OpenStackNova, RedHatPlugin):
             "/etc/security/limits.d/91-nova.conf",
             "/etc/sysconfig/openstack-nova-novncproxy"
         ])
+        if self.get_option("all_logs"):
+            self.add_copy_spec([
+                "/var/log/httpd/nova_api*",
+                "/var/log/httpd/placement*",
+            ])
+        else:
+            self.add_copy_spec([
+                "/var/log/httpd/nova_api*.log",
+                "/var/log/httpd/placement*.log",
+            ])
 
 # vim: set et ts=4 sw=4 :

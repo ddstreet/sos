@@ -54,7 +54,8 @@ class OpenStackCeilometer(Plugin):
             "admin_password", "connection_password", "host_password",
             "memcache_secret_key", "os_password", "password", "qpid_password",
             "rabbit_password", "readonly_user_password", "secret_key",
-            "ssl_key_password", "telemetry_secret", "metering_secret"
+            "ssl_key_password", "telemetry_secret", "metering_secret",
+            "transport_url"
         ]
         connection_keys = ["connection"]
 
@@ -85,15 +86,7 @@ class DebianCeilometer(OpenStackCeilometer, DebianPlugin,
 
 class RedHatCeilometer(OpenStackCeilometer, RedHatPlugin):
 
-    packages = (
-        'openstack-ceilometer',
-        'openstack-ceilometer-api',
-        'openstack-ceilometer-central',
-        'openstack-ceilometer-collector',
-        'openstack-ceilometer-common',
-        'openstack-ceilometer-compute',
-        'python-ceilometerclient'
-    )
+    packages = ('openstack-selinux',)
 
     def setup(self):
         super(RedHatCeilometer, self).setup()

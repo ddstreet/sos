@@ -41,7 +41,12 @@ class OpenStackNeutron(Plugin):
             self.var_puppet_gen + "/etc/default/neutron-server",
             self.var_puppet_gen + "/etc/my.cnf.d/tripleo.cnf"
         ])
+        # copy whole /var/lib/neutron except for potentially huge lock subdir;
+        # rather take a list of files in the dir only
         self.add_copy_spec("/var/lib/neutron/")
+        self.add_forbidden_path("/var/lib/neutron/lock")
+        self.add_cmd_output("ls -laZR /var/lib/neutron/lock")
+
         if self.get_option("verify"):
             self.add_cmd_output("rpm -V %s" % ' '.join(self.packages))
 
@@ -80,7 +85,7 @@ class OpenStackNeutron(Plugin):
             "crd_password", "primary_l3_host_password", "serverauth",
             "ucsm_password", "ha_vrrp_auth_password", "ssl_key_password",
             "nsx_password", "vcenter_password", "edge_appliance_password",
-            "tenant_admin_password", "apic_password"
+            "tenant_admin_password", "apic_password", "transport_url"
         ]
         connection_keys = ["connection"]
 
@@ -120,26 +125,7 @@ class DebianNeutron(OpenStackNeutron, DebianPlugin, UbuntuPlugin):
 
 class RedHatNeutron(OpenStackNeutron, RedHatPlugin):
 
-    packages = [
-        'openstack-neutron',
-        'openstack-neutron-linuxbridge'
-        'openstack-neutron-metaplugin',
-        'openstack-neutron-openvswitch',
-        'openstack-neutron-bigswitch',
-        'openstack-neutron-brocade',
-        'openstack-neutron-cisco',
-        'openstack-neutron-hyperv',
-        'openstack-neutron-midonet',
-        'openstack-neutron-nec'
-        'openstack-neutron-nicira',
-        'openstack-neutron-plumgrid',
-        'openstack-neutron-ryu',
-        'python-neutron',
-        'python-neutronclient'
-    ]
-
-    def check_enabled(self):
-        return self.is_installed("openstack-neutron")
+    packages = ('openstack-selinux',)
 
     def setup(self):
         super(RedHatNeutron, self).setup()

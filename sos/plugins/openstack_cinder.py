@@ -24,6 +24,8 @@ class OpenStackCinder(Plugin):
     var_puppet_gen = "/var/lib/config-data/puppet-generated/cinder"
 
     def setup(self):
+        cinder_config = ""
+        cinder_config_opt = "--config-dir %s/etc/cinder/"
 
         # check if either standalone (cinder-api) or httpd wsgi (cinder_wsgi)
         # is up and running
@@ -34,17 +36,9 @@ class OpenStackCinder(Plugin):
             if in_ps:
                 break
 
-        container_status = self.get_command_output("docker ps")
-        in_container = False
-        cinder_config = ""
-        if container_status['status'] == 0:
-            for line in container_status['output'].splitlines():
-                if line.endswith("cinder_api"):
-                    in_container = True
-                    # if containerized we need to pass the config to the cont.
-                    cinder_config = "--config-dir " + self.var_puppet_gen + \
-                                    "/etc/cinder/"
-                    break
+        in_container = self.running_in_container()
+        if in_container:
+            cinder_config = cinder_config_opt % self.var_puppet_gen
 
         # collect commands output if the standalone, wsgi or container is up
         if in_ps or in_container:
@@ -81,6 +75,15 @@ class OpenStackCinder(Plugin):
         if self.get_option("verify"):
             self.add_cmd_output("rpm -V %s" % ' '.join(self.packages))
 
+    def running_in_container(self):
+        for runtime in ["docker", "podman"]:
+            container_status = self.get_command_output(runtime + " ps")
+            if container_status['status'] == 0:
+                for line in container_status['output'].splitlines():
+                    if line.endswith("cinder_api"):
+                        return True
+        return False
+
     def apply_regex_sub(self, regexp, subst):
         self.do_path_regex_sub("/etc/cinder/*", regexp, subst)
         self.do_path_regex_sub(
@@ -99,7 +102,7 @@ class OpenStackCinder(Plugin):
             "password", "qpid_password", "rabbit_password", "san_password",
             "ssl_key_password", "vmware_host_password", "zadara_password",
             "zfssa_initiator_password", "hmac_keys", "zfssa_target_password",
-            "os_privileged_user_password"
+            "os_privileged_user_password", "transport_url"
         ]
         connection_keys = ["connection"]
 
@@ -127,10 +130,6 @@ class DebianCinder(OpenStackCinder, DebianPlugin, UbuntuPlugin):
         'python-cinderclient'
     )
 
-    def check_enabled(self):
-        self.cinder = self.is_installed("cinder-common")
-        return self.cinder
-
     def setup(self):
         super(DebianCinder, self).setup()
 
@@ -138,13 +137,7 @@ class DebianCinder(OpenStackCinder, DebianPlugin, UbuntuPlugin):
 class RedHatCinder(OpenStackCinder, RedHatPlugin):
 
     cinder = False
-    packages = ('openstack-cinder',
-                'python-cinder',
-                'python-cinderclient')
-
-    def check_enabled(self):
-        self.cinder = self.is_installed("openstack-cinder")
-        return self.cinder
+    packages = ('openstack-selinux',)
 
     def setup(self):
         super(RedHatCinder, self).setup()
