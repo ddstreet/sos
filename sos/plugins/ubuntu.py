@@ -18,7 +18,5 @@ class Ubuntu(Plugin, UbuntuPlugin):
 
     def setup(self):
         self.add_cmd_output([
-            "ubuntu-support-status --show-all",
-            "hwe-support-status --verbose",
             "ubuntu-advantage status"
         ])
